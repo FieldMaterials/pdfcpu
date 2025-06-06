@@ -568,7 +568,7 @@ func colorSpaceForJPEGColorModel(cm color.Model) string {
 	return ""
 }
 
-func createDCTImageStreamDictForJPEG(xRefTable *XRefTable, c image.Config, bb bytes.Buffer) (*types.StreamDict, error) {
+func createDCTImageStreamDictForJPEG(xRefTable *XRefTable, c image.Config, bb peekReader) (*types.StreamDict, error) {
 	cs := colorSpaceForJPEGColorModel(c.ColorModel)
 	if cs == "" {
 		return nil, errors.New("pdfcpu: unexpected color model for JPEG")
@@ -577,7 +577,7 @@ func createDCTImageStreamDictForJPEG(xRefTable *XRefTable, c image.Config, bb by
 	return CreateDCTImageStreamDict(xRefTable, bb.Bytes(), c.Width, c.Height, 8, cs)
 }
 
-func createImageResourcesForJPEG(xRefTable *XRefTable, c image.Config, bb bytes.Buffer) ([]ImageResource, error) {
+func createImageResourcesForJPEG(xRefTable *XRefTable, c image.Config, bb peekReader) ([]ImageResource, error) {
 	sd, err := createDCTImageStreamDictForJPEG(xRefTable, c, bb)
 	if err != nil {
 		return nil, err
@@ -662,10 +662,10 @@ func decodeImage(xRefTable *XRefTable, buf *bytes.Reader, currentOffset int64, g
 	return int64(nextIFDOffset), nil
 }
 
-func createImageResourcesForTIFF(xRefTable *XRefTable, bb bytes.Buffer, gray, sepia bool) ([]ImageResource, error) {
+func createImageResourcesForTIFF(xRefTable *XRefTable, bb peekReader, gray, sepia bool) ([]ImageResource, error) {
 	imgResources := []ImageResource{}
 
-	buf := bytes.NewReader(bb.Bytes())
+	buf := bb.Reader
 
 	var header [8]byte
 	if _, err := io.ReadFull(buf, header[:]); err != nil {
@@ -700,8 +700,8 @@ func createImageResourcesForTIFF(xRefTable *XRefTable, bb bytes.Buffer, gray, se
 	return imgResources, nil
 }
 
-func createImageResources(xRefTable *XRefTable, c image.Config, bb bytes.Buffer, gray, sepia bool) ([]ImageResource, error) {
-	img, format, err := image.Decode(&bb)
+func createImageResources(xRefTable *XRefTable, c image.Config, bb peekReader, gray, sepia bool) ([]ImageResource, error) {
+	img, format, err := image.Decode(bb)
 	if err != nil {
 		return nil, err
 	}
@@ -749,16 +749,7 @@ func createImageResources(xRefTable *XRefTable, c image.Config, bb bytes.Buffer,
 
 // CreateImageResources creates a new XObject for given image data represented by r and applies optional filters.
 func CreateImageResources(xRefTable *XRefTable, r io.Reader, gray, sepia bool) ([]ImageResource, error) {
-
-	var bb bytes.Buffer
-	tee := io.TeeReader(r, &bb)
-
-	var sniff bytes.Buffer
-	if _, err := io.Copy(&sniff, tee); err != nil {
-		return nil, err
-	}
-
-	c, format, err := image.DecodeConfig(&sniff)
+	c, format, bb, err := decodeConfig(r)
 	if err != nil {
 		return nil, err
 	}
@@ -776,16 +767,7 @@ func CreateImageResources(xRefTable *XRefTable, r io.Reader, gray, sepia bool) (
 
 // CreateImageStreamDict returns a stream dict for image data represented by r and applies optional filters.
 func CreateImageStreamDict(xRefTable *XRefTable, r io.Reader) (*types.StreamDict, int, int, error) {
-
-	var bb bytes.Buffer
-	tee := io.TeeReader(r, &bb)
-
-	var sniff bytes.Buffer
-	if _, err := io.Copy(&sniff, tee); err != nil {
-		return nil, 0, 0, err
-	}
-
-	c, format, err := image.DecodeConfig(&sniff)
+	c, format, bb, err := decodeConfig(r)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -798,7 +780,7 @@ func CreateImageStreamDict(xRefTable *XRefTable, r io.Reader) (*types.StreamDict
 		return sd, c.Width, c.Height, nil
 	}
 
-	img, format, err := image.Decode(&bb)
+	img, format, err := image.Decode(bb)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -818,6 +800,65 @@ func CreateImageStreamDict(xRefTable *XRefTable, r io.Reader) (*types.StreamDict
 		return nil, 0, 0, err
 	}
 	return sd, c.Width, c.Height, nil
+}
+
+func decodeConfig(r io.Reader) (config image.Config, format string, content peekReader, err error) {
+	switch rd := r.(type) {
+	case *bytes.Reader:
+		content = peekReader{rd}
+		config, format, err = image.DecodeConfig(peekReader{bytes.NewReader(content.Bytes())})
+	case *bytes.Buffer:
+		content = peekReader{bytes.NewReader(rd.Bytes())}
+		config, format, err = image.DecodeConfig(peekReader{bytes.NewReader(rd.Bytes())})
+	case io.ReadSeeker:
+		currentPos, _ := rd.Seek(0, io.SeekCurrent)
+		endPos, _ := rd.Seek(0, io.SeekEnd)
+		rd.Seek(currentPos, io.SeekStart)
+
+		buf := &bytes.Buffer{}
+		buf.Grow(int(endPos - currentPos + 1))
+		if _, err := buf.ReadFrom(rd); err != nil {
+			return image.Config{}, "", peekReader{}, err
+		}
+
+		return decodeConfig(buf)
+	default:
+		b, err := io.ReadAll(rd)
+		if err != nil {
+			return image.Config{}, "", peekReader{}, err
+		}
+
+		return decodeConfig(bytes.NewReader(b))
+	}
+
+	return
+}
+
+type peekReader struct {
+	*bytes.Reader
+}
+
+func (p peekReader) Peek(n int) ([]byte, error) {
+	b := p.Bytes()
+	if n > len(b) {
+		return nil, io.ErrShortBuffer
+	}
+	return b[:n], nil
+}
+
+func (p peekReader) Bytes() []byte {
+	var s bytesStealer
+	p.Reader.WriteTo(&s)
+	return s.b
+}
+
+type bytesStealer struct {
+	b []byte
+}
+
+func (b *bytesStealer) Write(p []byte) (int, error) {
+	b.b = p
+	return 0, nil
 }
 
 // CreateImageResource creates a new XObject for given image data represented by r and applies optional filters.
