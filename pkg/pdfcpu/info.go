@@ -146,9 +146,15 @@ func ensureInfoDict(ctx *model.Context) error {
 		return err
 	}
 
-	d.Update("CreationDate", types.StringLiteral(now))
-	d.Update("ModDate", types.StringLiteral(now))
-	d.Update("Producer", types.StringLiteral(v))
+	setIfNeeded := func(k, v string) {
+		if _, ok := d.Find(k); !ok || !ctx.Conf.UseOwnXRefInfo {
+			d.Update(k, types.StringLiteral(v))
+		}
+	}
+
+	setIfNeeded("CreationDate", now)
+	setIfNeeded("ModDate", now)
+	setIfNeeded("Producer", now)
 
 	return nil
 }

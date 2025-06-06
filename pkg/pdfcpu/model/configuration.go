@@ -193,6 +193,11 @@ type Configuration struct {
 	// End of line char sequence for writing.
 	Eol string
 
+	// UseOwnXRefInfo configures context writing to not override
+	// XRef document information ID, Producer, CreationDate and ModDate.
+	// This is useful for generating PDFs in an idempotent manner.
+	UseOwnXRefInfo bool
+
 	// Turns on object stream generation.
 	// A signal for compressing any new non-stream-object into an object stream.
 	// true enforces WriteXRefStream to true.

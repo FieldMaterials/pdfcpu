@@ -206,7 +206,9 @@ func ensureFileID(ctx *model.Context) error {
 		return errors.New("pdfcpu: ID must be an array with 2 elements")
 	}
 
-	a[1] = fid
+	if !ctx.Conf.UseOwnXRefInfo {
+		a[1] = fid
+	}
 
 	return nil
 }
